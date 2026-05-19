@@ -1,0 +1,197 @@
+RAG RETRIEVAL API — DESIGN DECISIONS
+=====================================
+Date: 2026-05-15
+Project: Kyoritsu RAG — NW-RAG
+
+
+1. FRAMEWORK
+─────────────────────────────────────────────────────────────────────────
+Decision : FastAPI + Uvicorn, single worker process.
+Reason   : GPU models (embed + rerank) are not thread-safe. Multiple
+           workers would each try to own the GPU, causing contention.
+           Single worker with async event loop is the correct model.
+Rejected : Multiple uvicorn workers (GPU contention), raw asyncio/aiohttp
+           (no automatic request validation or OpenAPI docs).
+
+
+2. MODEL LIFECYCLE
+─────────────────────────────────────────────────────────────────────────
+Decision : Load all models once at startup via FastAPI lifespan context
+           manager. Store as app.state singletons.
+           Models: embed_tok/mod (ruri-v3-310m), rerank_tok/mod
+           (bge-reranker-v2-m3), sudachi_tok.
+Reason   : Model loading takes 10–30s. Loading per request is
+           unacceptable. Singletons shared across all requests with no
+           re-initialisation overhead.
+Rejected : Per-request loading (too slow), separate model server like
+           Triton or TEI (overkill for single-machine deployment).
+
+
+3. GPU CONCURRENCY MODEL
+─────────────────────────────────────────────────────────────────────────
+Decision : ThreadPoolExecutor(max_workers=1) for all GPU calls
+           (embed_query and rerank). Async event loop stays free during
+           DB I/O. GPU work is strictly serialized.
+Reason   : ruri-v3-310m and bge-reranker-v2-m3 are PyTorch encoder
+           models — not thread-safe. Concurrent GPU calls cause
+           AttributeError crashes. Executor serializes them while
+           keeping the HTTP layer non-blocking.
+Note     : vLLM continuous batching was considered but vLLM is designed
+           for autoregressive LLM generation, not encoder models.
+           vLLM is reserved for the synthesis LLM layer (14B/7B models)
+           in the broader multi-agent system, not this retriever API.
+Rejected : ThreadPoolExecutor(max_workers>1) (GPU race conditions),
+           asyncio.to_thread without serialization (same problem),
+           HuggingFace TEI server (adds network hop, overkill for 2
+           agents at current scale).
+
+
+4. DATABASE DRIVER
+─────────────────────────────────────────────────────────────────────────
+Decision : asyncpg with a connection pool (min=2, max=10).
+Reason   : psycopg2 is synchronous — blocking DB calls inside an async
+           FastAPI handler stall the entire event loop. asyncpg is
+           native async, uses $N positional parameters, and supports
+           asyncio.gather for concurrent BM25 + vector queries.
+Rejected : psycopg2 in executor (wastes executor slots on I/O, not just
+           GPU), psycopg3 async (also valid but asyncpg is more mature
+           for high-concurrency use cases).
+
+
+5. CONCURRENCY STRATEGY FOR BM25 + VECTOR SEARCH
+─────────────────────────────────────────────────────────────────────────
+Decision : BM25 search and vector search run concurrently via
+           asyncio.gather inside each request. Both use the same
+           asyncpg pool. Results are merged in-memory via RRF.
+Reason   : These are independent DB queries — no reason to run them
+           sequentially. Concurrent execution cuts per-request latency
+           by ~30–50% depending on DB load.
+Note     : Reranking cannot be batched across concurrent requests because
+           each request has a unique (query, candidate_pool) pair. It
+           runs per-request through the executor.
+
+
+6. FILTER RESOLUTION
+─────────────────────────────────────────────────────────────────────────
+Decision : Agents may pass query only (no filters) or explicit filter
+           overrides. When filters are omitted, taxonomy_pass() extracts
+           them automatically from the query text (company, dept,
+           section, year, month from Japanese text).
+           Explicit agent-supplied filters always take priority.
+Reason   : Agents that know their context (e.g. "I am asking about
+           営業部") should be able to specify filters directly for
+           precision. Agents that don't know should get correct routing
+           from the rule-based taxonomy pass.
+
+
+7. ENDPOINTS
+─────────────────────────────────────────────────────────────────────────
+Decision : Two endpoints only.
+           POST /v1/tool/retrieval  — main retrieval endpoint
+           GET  /v1/health          — liveness check
+Reason   : This is a tool API for internal agent use, not a public
+           product API. Minimalism reduces surface area.
+           /v1/ prefix allows future versioning without breaking agents.
+           /tool/ signals to agent orchestrators that this is a
+           callable tool, not a data service.
+           Health endpoint is required for orchestrators to verify
+           readiness before routing queries.
+
+
+8. REQUEST / RESPONSE SCHEMA
+─────────────────────────────────────────────────────────────────────────
+Decision : Request  — query (required), company/dept/section/year/month/
+                      doc_type (optional overrides), top_k (default 8,
+                      max 50), no_rerank (default false).
+           Response — chunks list (full fields), count, filters_applied.
+           Chunk fields returned: doc_chunk_id, doc_id, chunk,
+           chunk_type, company, dept, section, doc_type, year, month,
+           meeting_date, rrf_score, rerank_score.
+           Dropped from response: bm25_rank, vec_rank (internal
+           plumbing, agents have no use for rank positions).
+Reason   : Agents need full chunk text and provenance (company, dept,
+           date) to reason correctly. Scores are included so agents can
+           apply their own relevance thresholds. Filters_applied lets
+           agents verify the API interpreted the query correctly.
+
+
+9. ZERO-RESULT BEHAVIOUR
+─────────────────────────────────────────────────────────────────────────
+Decision : Return HTTP 200 with empty chunks list and count=0.
+Reason   : No results is a valid retrieval outcome, not an error.
+           Agents should decide what to do (retry with looser filters,
+           report no data, etc.). A 404 or 204 would force agents to
+           handle an exception path for a normal condition.
+
+
+10. REQUEST TIMEOUT
+─────────────────────────────────────────────────────────────────────────
+Decision : 60 seconds. Returns HTTP 504 on timeout.
+Reason   : Embed + rerank on GPU typically takes 3–10s per request.
+           Under queue pressure (multiple agents), wait time can
+           accumulate. 60s gives headroom for worst-case queue depth
+           without hanging agents indefinitely.
+
+
+11. AUTHENTICATION
+─────────────────────────────────────────────────────────────────────────
+Decision : No authentication for now.
+Reason   : Internal service running on a private network / localhost.
+           Only trusted agents within the same multi-agent system call
+           this API. Adding API key auth is trivial when needed.
+
+
+12. PORT
+─────────────────────────────────────────────────────────────────────────
+Decision : Default port 8000, overridable via PORT environment variable.
+Reason   : Standard FastAPI/uvicorn default. Does not conflict with
+           Ollama (11434) or PostgreSQL (5434). Env-configurable for
+           deployment flexibility.
+
+
+13. LOGGING
+─────────────────────────────────────────────────────────────────────────
+Decision : One INFO line on request receipt, one INFO line on response.
+           Format: "%(levelname)s | %(message)s" (matches rest of
+           codebase). Logs written to api/logs/api.log (file handler)
+           and stdout (console handler).
+           Log directory: api/logs/ — isolated from project root logs/.
+           Smoke test results also written to api/logs/smoke_<ts>.json.
+Reason   : One-line in/out per request gives enough signal to trace
+           slow queries and count errors without flooding logs with
+           per-chunk detail. File isolation prevents the API's
+           operational logs from mixing with ingestion/chunking logs.
+
+
+14. SCOPE — RETRIEVAL ONLY, NO SYNTHESIS
+─────────────────────────────────────────────────────────────────────────
+Decision : API returns raw retrieved chunks. No LLM synthesis call.
+           Agents receive chunk text and metadata; they perform their
+           own reasoning.
+Reason   : The multi-agent system uses this API as a tool. Each agent
+           has its own reasoning loop and context. Synthesis inside the
+           retriever would impose a single fixed prompt on all agents,
+           preventing them from composing retrieved evidence with their
+           own chain-of-thought. Stateless retrieval keeps the API
+           simple, fast, and universally reusable.
+
+
+15. STATELESSNESS
+─────────────────────────────────────────────────────────────────────────
+Decision : API is fully stateless. No session, no conversation history,
+           no caching of prior queries.
+Reason   : Each agent call is independent. The multi-agent orchestrator
+           manages state. Statelessness makes the API horizontally
+           scalable (add more instances when agent count grows) and
+           trivially restartable without data loss.
+
+
+FILES PRODUCED
+─────────────────────────────────────────────────────────────────────────
+api/app/config.py    — DB creds, port, timeout (all env-overridable)
+api/app/schema.py    — Pydantic request/response models
+api/app/retrieve.py  — Async retrieval logic (asyncpg, asyncio.gather)
+api/app/routes.py    — Endpoint handlers, timeout, INFO logging
+api/app/main.py      — App factory, lifespan, logging setup
+api/smoke_test.py    — Concurrent smoke test (configurable waves)
+api/logs/            — Runtime API logs and smoke test JSON results

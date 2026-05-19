@@ -3,7 +3,7 @@
 retrieve.py — Hybrid retrieval: BM25 + vector → RRF → bge-reranker-v2-m3.
 
 Pipeline:
-  1. Parse temporal cues (year/month) from the query string
+  1. Taxonomy pass — extract company/dept/section/doc_type/year/month from query
   2. Embed query with prefix "検索クエリ: " via ruri-v3-310m
   3. BM25 search (Sudachi tokenize → ts_rank) — top BM25_K candidates
   4. Vector search (pgvector cosine) — top VEC_K candidates
@@ -19,8 +19,6 @@ import argparse
 import dataclasses
 import logging
 import re
-import sys
-from pathlib import Path
 from typing import Optional
 
 import psycopg2
@@ -30,6 +28,8 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification  # pyrefly: ignore
 from sudachipy import dictionary, tokenizer as sudachi_tokenizer  # pyrefly: ignore
+
+from filters import taxonomy_pass
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 EMBED_MODEL   = "cl-nagoya/ruri-v3-310m"
@@ -75,18 +75,6 @@ class RetrievedChunk:
     vec_rank:     Optional[int]
     rrf_score:    float
     rerank_score: Optional[float]
-
-
-# ─── Temporal parser ──────────────────────────────────────────────────────────
-
-_YEAR_RE  = re.compile(r"(\d{4})年")
-_MONTH_RE = re.compile(r"(\d{1,2})月")
-
-def parse_temporal(query: str) -> tuple[Optional[int], Optional[int]]:
-    """Extract (year, month) from Japanese date mentions in query. Returns None if absent."""
-    year  = int(m.group(1)) if (m := _YEAR_RE.search(query)) else None
-    month = int(m.group(1)) if (m := _MONTH_RE.search(query)) else None
-    return year, month
 
 
 # ─── Sudachi tokenizer ────────────────────────────────────────────────────────
@@ -173,8 +161,15 @@ def get_conn():
         user=DB_USER, password=DB_PASSWORD,
     )
 
-def build_filter_clause(year: Optional[int], month: Optional[int],
-                        company: Optional[str]) -> tuple[str, list]:
+def build_filter_clause(
+    year:         Optional[int]  = None,
+    month:        Optional[int]  = None,
+    company:      Optional[str]  = None,
+    dept:         Optional[str]  = None,
+    section:      Optional[str]  = None,
+    doc_type:     Optional[str]  = None,
+    meeting_date: Optional[str]  = None,
+) -> tuple[str, list]:
     """Return (WHERE clause fragment, params list). Empty string if no filters."""
     parts, params = [], []
     if year:
@@ -186,6 +181,18 @@ def build_filter_clause(year: Optional[int], month: Optional[int],
     if company:
         parts.append("dc.company = %s")
         params.append(company)
+    if dept:
+        parts.append("dc.dept = %s")
+        params.append(dept)
+    if section:
+        parts.append("dc.section = %s")
+        params.append(section)
+    if doc_type:
+        parts.append("dc.doc_type = %s")
+        params.append(doc_type)
+    if meeting_date:
+        parts.append("dc.doc_id IN (SELECT doc_id FROM documents WHERE meeting_date = %s)")
+        params.append(meeting_date)
     clause = "WHERE " + " AND ".join(parts) if parts else ""
     return clause, params
 
@@ -283,28 +290,41 @@ def fetch_chunks(conn, chunk_ids: list[str]) -> dict[str, RetrievedChunk]:
 # ─── Main retrieval function ──────────────────────────────────────────────────
 
 def retrieve(
-    query:      str,
+    query:        str,
     embed_tok,
     embed_mod,
     rerank_tok,
     rerank_mod,
     sudachi_tok,
-    device:     str,
-    year:       Optional[int]  = None,
-    month:      Optional[int]  = None,
-    company:    Optional[str]  = None,
-    top_k:      int            = FINAL_K,
-    no_rerank:  bool           = False,
+    device:       str,
+    year:         Optional[int]  = None,
+    month:        Optional[int]  = None,
+    company:      Optional[str]  = None,
+    dept:         Optional[str]  = None,
+    section:      Optional[str]  = None,
+    doc_type:     Optional[str]  = None,
+    meeting_date: Optional[str]  = None,
+    top_k:        int            = FINAL_K,
+    no_rerank:    bool           = False,
 ) -> list[RetrievedChunk]:
-    # 1. Temporal from query if not explicit
-    q_year, q_month = parse_temporal(query)
-    eff_year  = year  if year  is not None else q_year
-    eff_month = month if month is not None else q_month
+    tax = taxonomy_pass(query)
+    eff_year         = year         if year         is not None else (tax["periods"][0][0]    if tax["periods"]  else None)
+    eff_month        = month        if month        is not None else (tax["periods"][0][1]    if tax["periods"]  else None)
+    eff_company      = company      if company      is not None else (tax["companies"][0]     if tax["companies"] else None)
+    eff_dept         = dept         if dept         is not None else (tax["depts"][0]         if tax["depts"]    else None)
+    eff_section      = section      if section      is not None else (tax["sections"][0]      if tax["sections"] else None)
+    eff_doc_type     = doc_type     if doc_type     is not None else (tax["doc_types"][0]     if tax["doc_types"] else None)
+    eff_meeting_date = meeting_date if meeting_date is not None else (tax["meeting_dates"][0] if tax["meeting_dates"] else None)
 
-    if eff_year or eff_month:
-        log.info("Temporal filter: year=%s month=%s", eff_year, eff_month)
+    log.info("Filters: company=%s dept=%s section=%s doc_type=%s year=%s month=%s meeting_date=%s",
+             eff_company, eff_dept, eff_section, eff_doc_type,
+             eff_year, eff_month, eff_meeting_date)
 
-    filter_clause, filter_params = build_filter_clause(eff_year, eff_month, company)
+    filter_clause, filter_params = build_filter_clause(
+        year=eff_year, month=eff_month, company=eff_company,
+        dept=eff_dept, section=eff_section,
+        doc_type=eff_doc_type, meeting_date=eff_meeting_date,
+    )
 
     # 2. Embed query
     log.info("Embedding query ...")
@@ -352,29 +372,46 @@ def retrieve(
 
     log.info("Reranking %d candidates ...", len(candidates))
     reranked = rerank(rerank_tok, rerank_mod, query, candidates, device)
-    return reranked[:top_k]
+    final = reranked[:top_k]
+
+    return final
 
 
 # ─── Two-phase API for eval ablation (shared BM25+vector+RRF, branch at rerank) ──
 
 def retrieve_rrf_pool(
-    query:      str,
+    query:        str,
     embed_tok,
     embed_mod,
     sudachi_tok,
-    device:     str,
-    year:       Optional[int] = None,
-    month:      Optional[int] = None,
-    company:    Optional[str] = None,
+    device:       str,
+    year:         Optional[int] = None,
+    month:        Optional[int] = None,
+    company:      Optional[str] = None,
+    dept:         Optional[str] = None,
+    section:      Optional[str] = None,
+    doc_type:     Optional[str] = None,
+    meeting_date: Optional[str] = None,
 ) -> list[RetrievedChunk]:
     """Runs embed + BM25 + vector + RRF. Returns top RRF_K candidates (no reranking)."""
-    q_year, q_month = parse_temporal(query)
-    eff_year  = year  if year  is not None else q_year
-    eff_month = month if month is not None else q_month
-    if eff_year or eff_month:
-        log.info("Temporal filter: year=%s month=%s", eff_year, eff_month)
+    tax = taxonomy_pass(query)
+    eff_year         = year         if year         is not None else (tax["periods"][0][0]    if tax["periods"]       else None)
+    eff_month        = month        if month        is not None else (tax["periods"][0][1]    if tax["periods"]       else None)
+    eff_company      = company      if company      is not None else (tax["companies"][0]     if tax["companies"]     else None)
+    eff_dept         = dept         if dept         is not None else (tax["depts"][0]         if tax["depts"]         else None)
+    eff_section      = section      if section      is not None else (tax["sections"][0]      if tax["sections"]      else None)
+    eff_doc_type     = doc_type     if doc_type     is not None else (tax["doc_types"][0]     if tax["doc_types"]     else None)
+    eff_meeting_date = meeting_date if meeting_date is not None else (tax["meeting_dates"][0] if tax["meeting_dates"] else None)
 
-    filter_clause, filter_params = build_filter_clause(eff_year, eff_month, company)
+    log.info("Filters: company=%s dept=%s section=%s doc_type=%s year=%s month=%s meeting_date=%s",
+             eff_company, eff_dept, eff_section, eff_doc_type,
+             eff_year, eff_month, eff_meeting_date)
+
+    filter_clause, filter_params = build_filter_clause(
+        year=eff_year, month=eff_month, company=eff_company,
+        dept=eff_dept, section=eff_section,
+        doc_type=eff_doc_type, meeting_date=eff_meeting_date,
+    )
     log.info("Embedding query ...")
     vec = embed_query(embed_tok, embed_mod, query, device)
 

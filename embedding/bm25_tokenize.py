@@ -23,6 +23,7 @@ import time
 from typing import Generator
 
 import psycopg2
+# pyrefly: ignore [missing-import]
 from sudachipy import dictionary, tokenizer
 from tqdm import tqdm
 
