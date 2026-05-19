@@ -45,7 +45,7 @@ DB_PASSWORD   = "admin1234"
 
 BM25_K  = 50   # BM25 candidates
 VEC_K   = 50   # vector candidates
-RRF_K   = 20   # candidates sent to reranker after RRF fusion
+RRF_K   = 35   # candidates sent to reranker after RRF fusion (raised: table chunks ranked 21-35 were being cut)
 RRF_C   = 60   # RRF constant (standard value)
 FINAL_K = 8    # final results returned
 
@@ -307,6 +307,7 @@ def retrieve(
     top_k:        int            = FINAL_K,
     no_rerank:    bool           = False,
 ) -> list[RetrievedChunk]:
+
     tax = taxonomy_pass(query)
     eff_year         = year         if year         is not None else (tax["periods"][0][0]    if tax["periods"]  else None)
     eff_month        = month        if month        is not None else (tax["periods"][0][1]    if tax["periods"]  else None)

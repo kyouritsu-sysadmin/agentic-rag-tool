@@ -171,14 +171,23 @@ async def retrieve_async(
 
     t0 = t()
 
-    # Resolve unspecified filters from query text
+    # Resolve unspecified filters from query text.
+    # Rules for single-pass retrieval:
+    #   company  — apply when exactly one detected (safe, high-cardinality filter)
+    #   year     — apply first detected period year
+    #   month    — apply first detected period month
+    #   dept     — only apply when caller passes it explicitly OR exactly one dept detected
+    #              (multiple depts = multi-hop question; single filter would miss the others)
+    #   section  — never auto-apply from taxonomy (too granular; causes false-zero intersections
+    #              when query mentions a section from a different dept than eff_dept)
+    #   doc_type — apply when detected
     tax          = taxonomy_pass(query)
-    eff_year     = year     if year     is not None else (tax["periods"][0][0] if tax["periods"]   else None)
-    eff_month    = month    if month    is not None else (tax["periods"][0][1] if tax["periods"]   else None)
-    eff_company  = company  if company  is not None else (tax["companies"][0]  if tax["companies"] else None)
-    eff_dept     = dept     if dept     is not None else (tax["depts"][0]      if tax["depts"]     else None)
-    eff_section  = section  if section  is not None else (tax["sections"][0]   if tax["sections"]  else None)
-    eff_doc_type = doc_type if doc_type is not None else (tax["doc_types"][0]  if tax["doc_types"] else None)
+    eff_year     = year     if year     is not None else (tax["periods"][0][0]  if tax["periods"]            else None)
+    eff_month    = month    if month    is not None else (tax["periods"][0][1]  if tax["periods"]            else None)
+    eff_company  = company  if company  is not None else (tax["companies"][0]   if len(tax["companies"]) == 1 else None)
+    eff_dept     = dept     if dept     is not None else (tax["depts"][0]       if len(tax["depts"])     == 1 else None)
+    eff_section  = section  # never infer from taxonomy in single-pass mode
+    eff_doc_type = doc_type if doc_type is not None else (tax["doc_types"][0]  if tax["doc_types"]          else None)
 
     filter_clause, filter_params = _build_filter_clause(
         eff_year, eff_month, eff_company, eff_dept, eff_section, eff_doc_type
@@ -206,9 +215,12 @@ async def retrieve_async(
     fused   = rrf_fuse(bm25_results, vec_results)
     rrf_top = fused[:RRF_K]
 
+    _eff = {"company": eff_company, "dept": eff_dept, "section": eff_section,
+            "year": eff_year, "month": eff_month, "doc_type": eff_doc_type}
+
     if not rrf_top:
         return [], {"taxonomy_ms": 0, "embed_ms": 0, "db_search_ms": 0,
-                    "fetch_ms": 0, "rerank_ms": 0, "total_ms": 0}
+                    "fetch_ms": 0, "rerank_ms": 0, "total_ms": 0, "eff_filters": _eff}
 
     # DB: fetch full chunk rows
     top_ids    = [cid for cid, _, _, _ in rrf_top]
@@ -233,6 +245,7 @@ async def retrieve_async(
             "fetch_ms":     round((t_fetch      - t_db_search)* 1000, 1),
             "rerank_ms":    0,
             "total_ms":     round((t_fetch      - t0)         * 1000, 1),
+            "eff_filters":  _eff,
         }
         return candidates[:top_k], timings
 
@@ -250,5 +263,6 @@ async def retrieve_async(
         "fetch_ms":     round((t_fetch       - t_db_search) * 1000, 1),
         "rerank_ms":    round((t_rerank      - t_fetch)     * 1000, 1),
         "total_ms":     round((t_rerank      - t0)          * 1000, 1),
+        "eff_filters":  _eff,
     }
     return reranked[:top_k], timings

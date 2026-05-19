@@ -10,7 +10,7 @@ class RetrieveRequest(BaseModel):
     month:     int | None = None
     doc_type:  str | None = None
     top_k:     int        = Field(default=8, ge=1, le=50)
-    no_rerank: bool       = False
+    no_rerank: bool       = True
 
 
 class ChunkOut(BaseModel):

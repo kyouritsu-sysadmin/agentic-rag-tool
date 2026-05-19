@@ -134,7 +134,7 @@ def taxonomy_pass(user_query: str) -> dict:
 
     Returns:
         {
-          "companies":     list[str],               # always >= 1
+          "companies":     list[str],               # empty if none detected in query
           "depts":         list[str],               # empty if none found
           "sections":      list[str],               # empty if none found
           "doc_types":     list[str],               # empty if none found
@@ -147,10 +147,10 @@ def taxonomy_pass(user_query: str) -> dict:
 
     # Companies
     companies = _all_matches(user_query, COMPANY_ALIASES)
-    if not companies:
-        companies = [DEFAULT_COMPANY]
+    # No default fallback — undetected company means full-corpus search is safer
+    # than silently filtering to the wrong company.
 
-    company = companies[0]  # primary company for keyword resolution
+    company = companies[0] if companies else DEFAULT_COMPANY  # for keyword resolution only
 
     # Depts — taxonomy aliases first
     depts = _all_matches(user_query, DEPT_ALIASES)

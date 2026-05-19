@@ -62,16 +62,17 @@ async def retrieval(body: RetrieveRequest, req: Request):
         timings["db_search_ms"], timings["fetch_ms"], timings["rerank_ms"],
     )
 
+    eff = timings.get("eff_filters", {})
     return RetrieveResponse(
         chunks          = [ChunkOut(**vars(c)) for c in chunks],
         count           = len(chunks),
         filters_applied = FiltersApplied(
-            company  = body.company,
-            dept     = body.dept,
-            section  = body.section,
-            year     = body.year,
-            month    = body.month,
-            doc_type = body.doc_type,
+            company  = eff.get("company"),
+            dept     = eff.get("dept"),
+            section  = eff.get("section"),
+            year     = eff.get("year"),
+            month    = eff.get("month"),
+            doc_type = eff.get("doc_type"),
         ),
     )
 
