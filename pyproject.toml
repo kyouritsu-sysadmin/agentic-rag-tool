@@ -1,0 +1,4 @@
+# Python packages share the root .venv and uv.lock.
+# Backend dependencies and entry points stay in backend/pyproject.toml.
+[tool.uv.workspace]
+members = ["backend"]

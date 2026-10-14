@@ -1,0 +1,42 @@
+name: Application checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: rag_test
+          POSTGRES_PASSWORD: integration-only
+          POSTGRES_DB: rag_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rag_test -d rag_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      RAG_ALLOW_TEST_DATABASE_RESET: '1'
+      RAG_DATABASE_URL: postgresql+asyncpg://rag_test:integration-only@127.0.0.1:5432/rag_test
+      RAG_TEST_DATABASE_URL: postgresql+asyncpg://rag_test:integration-only@127.0.0.1:5432/rag_test
+      NEXT_PUBLIC_BACKEND_URL: http://127.0.0.1:8018
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: uv sync --frozen
+      - run: .venv/bin/ruff check backend && .venv/bin/ruff format --check backend
+      - run: .venv/bin/alembic -c backend/alembic.ini upgrade head
+      - run: .venv/bin/alembic -c backend/alembic.ini check
+      - run: .venv/bin/python backend/scripts/export_contracts.py --check
+      - run: .venv/bin/pytest backend/tests -q
+      - run: npm ci --prefix frontend
+      - run: npm --prefix frontend run lint
+      - run: npm --prefix frontend run build
+      - run: frontend/node_modules/.bin/playwright install --with-deps chromium
+      - run: frontend/node_modules/.bin/playwright test --config frontend/playwright.config.ts

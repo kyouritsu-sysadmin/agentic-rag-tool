@@ -1,0 +1,62 @@
+# Separate application database/volumes. Does not touch postgresql/docker-compose.yaml.
+name: kyoritsu-rag
+services:
+  db:
+    image: timescale/timescaledb-ha@sha256:0bb4a5e5c0e24119852612dee28694d71333820b33fafeb7968497e1faf4c182
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a database password}
+      POSTGRES_DB: rag
+    ports: ["127.0.0.1:5544:5432"]
+    volumes: ["postgres:/home/postgres/pgdata/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build: &backend_build
+      context: ..
+      dockerfile: backend/Dockerfile
+      args:
+        INSTALL_OCR: ${INSTALL_OCR:-false}
+    env_file: ${BACKEND_ENV_FILE:-../backend/.env}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db: {condition: service_healthy}
+    profiles: ["tools"]
+  api:
+    build: *backend_build
+    env_file: ${BACKEND_ENV_FILE:-../backend/.env}
+    environment:
+      RAG_STORAGE_DIR: /sources
+      RAG_DEVICE: cpu
+    ports: ["127.0.0.1:8005:8000"]
+    volumes: ["sources:/sources", "models:/home/rag/.cache"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      db: {condition: service_healthy}
+  worker:
+    restart: unless-stopped
+    build: *backend_build
+    env_file: ${BACKEND_ENV_FILE:-../backend/.env}
+    environment:
+      RAG_STORAGE_DIR: /sources
+      RAG_DEVICE: cpu
+      TORCH_DEVICE: cpu
+    command: ["rag-worker"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes: ["sources:/sources", "models:/home/rag/.cache"]
+    depends_on:
+      db: {condition: service_healthy}
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        NEXT_PUBLIC_BACKEND_URL: ${PUBLIC_API_URL:-http://localhost:8005}
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [api]
+volumes:
+  postgres:
+  sources:
+  models:

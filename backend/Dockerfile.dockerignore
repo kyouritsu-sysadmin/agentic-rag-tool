@@ -1,0 +1,14 @@
+# Allow only backend runtime inputs into the root build context.
+**
+!pyproject.toml
+!uv.lock
+!.python-version
+!backend/
+!backend/pyproject.toml
+!backend/src/
+!backend/src/**
+!backend/alembic.ini
+!backend/migrations/
+!backend/migrations/**
+**/__pycache__/
+**/*.pyc
