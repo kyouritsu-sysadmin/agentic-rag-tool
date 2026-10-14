@@ -4,22 +4,36 @@ services:
     image: timescale/timescaledb-ha:pg16
     container_name: rag_postgres
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_USER}
-      POSTGRES_DB: ${POSTGRES_USER}
+    env_file: .env
     ports:
-      - "${POSTGRESQL_PORT}:5432"
+      - "5434:5432"
     volumes:
-      - ${volumes}
+      # Must be a native Linux fs: Postgres requires 0700/0750 on PGDATA,
+      # which the NTFS drive at /mnt/storage cannot represent.
+      - "/mnt/llm/docker/data/rag_postgres/data:/home/postgres/pgdata/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - shared_one
 
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: rag_pgadmin
     restart: unless-stopped
-    env_file:
-      - config/.env
+    env_file: .env
     ports:
-      - "${POSTGRESQL_PORT}:80"
+      - "5050:80"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    networks:
+      - shared_one
+
+networks:
+  shared_one:
+    external : true
+
+
