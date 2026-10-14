@@ -1,4 +1,4 @@
-"""Build a source-only handover archive, including reviewed working-tree files.
+"""Build a handover archive from Git-tracked working-tree source files.
 
 Explicit roots exclude legacy data, credentials, caches, Git history and local archives.
 """
@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -39,28 +40,49 @@ EXCLUDED_DIRS = {
 
 
 def sources():
-    for name in ROOTS:
-        path = ROOT / name
-        for file in sorted(path.rglob("*")) if path.is_dir() else [path]:
-            relative = file.relative_to(ROOT)
-            if (
-                file.is_symlink()
-                or not file.is_file()
-                or EXCLUDED_DIRS.intersection(relative.parts)
-            ):
-                continue
-            if any(part.endswith(".egg-info") for part in relative.parts):
-                continue
-            if file.name.startswith(".env") and file.name != ".env.example":
-                continue
-            if file.name.startswith(".coverage") or file.suffix in {
-                ".pyc",
-                ".log",
-                ".tsbuildinfo",
-                ".bak",
-            }:
-                continue
-            yield file, str(relative)
+    from kyoritsu_backend.core.settings import Settings
+
+    config = Path(os.environ.get("RAG_ENV_FILE") or ROOT / "backend/.env").expanduser().resolve()
+    # Use the application's path resolution and environment precedence. Fail closed
+    # on invalid configuration; never print credentials in packaging diagnostics.
+    try:
+        if os.environ.get("RAG_ENV_FILE") and not config.is_file():
+            raise ValueError("Missing explicit configuration")
+        storage = Settings(_env_file=config).storage_dir.resolve()
+    except Exception:
+        raise RuntimeError("Cannot determine private paths; check backend configuration") from None
+    tracked = subprocess.check_output(["git", "ls-files", "--cached", "-z"], cwd=ROOT)
+    for name in sorted(set(os.fsdecode(tracked).split("\0")) - {""}):
+        relative = Path(name)
+        if relative.parts[0] not in ROOTS:
+            continue
+        file = ROOT / relative
+        if (
+            not file.is_file()
+            or any((ROOT / part).is_symlink() for part in (relative, *relative.parents))
+            or EXCLUDED_DIRS.intersection(relative.parts)
+        ):
+            continue
+        resolved = file.resolve()
+        if resolved == config or resolved == storage or storage in resolved.parents:
+            continue
+        if any(part.endswith(".egg-info") for part in relative.parts):
+            continue
+        if file.name.startswith(".env") and file.name != ".env.example":
+            continue
+        if file.name.startswith(".coverage") or file.suffix in {
+            ".env",
+            ".pem",
+            ".key",
+            ".p12",
+            ".pfx",
+            ".pyc",
+            ".log",
+            ".tsbuildinfo",
+            ".bak",
+        }:
+            continue
+        yield file, relative.as_posix()
 
 
 def main():

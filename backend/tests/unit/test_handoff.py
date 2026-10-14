@@ -121,3 +121,68 @@ def test_missing_explicit_configuration_fails(monkeypatch, tmp_path):
         Settings()
     # Test fixtures can intentionally opt out of all dotenv files.
     assert Settings(_env_file=None).answer_model == "qwen3:30b"
+
+
+def test_handoff_excludes_untracked_and_configured_private_paths(monkeypatch, tmp_path):
+    import runpy
+    import subprocess
+
+    module = runpy.run_path(str(Path(__file__).parents[2] / "scripts/package_handoff.py"))
+    sources = module["sources"]
+    monkeypatch.setitem(sources.__globals__, "ROOT", tmp_path)
+    files = {
+        "README.md": "Public source",
+        "backend/src/app.py": "# maintained source",
+        "backend/settings.txt": "RAG_STORAGE_DIR=uploads\n",
+        "backend/uploads/private.txt": "private document",
+        "backend/service.env": "PRIVATE_TOKEN=synthetic-secret\n",
+    }
+    for name, content in files.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    (tmp_path / "backend/untracked.txt").write_text("private local result")
+    monkeypatch.setenv("RAG_ENV_FILE", str(tmp_path / "backend/settings.txt"))
+    monkeypatch.delenv("RAG_STORAGE_DIR", raising=False)
+    assert {name for _, name in sources()} == {"README.md", "backend/src/app.py"}
+    # Process environment overrides dotenv storage; even tracked source paths are excluded.
+    monkeypatch.setenv("RAG_STORAGE_DIR", "src")
+    assert "backend/src/app.py" not in {name for _, name in sources()}
+
+
+async def test_summary_total_deadline_cancels_trickling_response(monkeypatch):
+    import asyncio
+    import httpx
+    from kyoritsu_backend.providers.summaries import summarize
+
+    closed = False
+    completed = False
+
+    class Trickle(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal completed
+            for piece in [b'{"response":"', *([b"x"] * 20), b'","done":true}']:
+                await asyncio.sleep(0.01)
+                yield piece
+            completed = True
+
+        async def aclose(self):
+            nonlocal closed
+            closed = True
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: original(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=Trickle())),
+            **kw,
+        ),
+    )
+    settings = Settings(_env_file=None, summary_timeout=0.05)
+    with pytest.raises(TimeoutError):
+        await summarize(settings, "source text")
+    assert closed
+    assert not completed

@@ -1,5 +1,7 @@
 """Chunk summaries using the retained summary model; failures never fabricate summaries."""
 
+import asyncio
+
 import httpx
 
 
@@ -13,9 +15,10 @@ async def summarize(settings, text):
         "このチャンクに含まれるデータやトピックを1〜2文で簡潔に要約してください。"
         "数値や会社名を推測しないでください。\n\n" + text
     )
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(settings.summary_timeout, connect=10)
-    ) as client:
+    async with (
+        asyncio.timeout(settings.summary_timeout),
+        httpx.AsyncClient(timeout=httpx.Timeout(settings.summary_timeout, connect=10)) as client,
+    ):
         response = await client.post(
             settings.ollama_url.rstrip("/") + "/api/generate",
             json={"model": settings.summary_model, "prompt": prompt, "stream": False},

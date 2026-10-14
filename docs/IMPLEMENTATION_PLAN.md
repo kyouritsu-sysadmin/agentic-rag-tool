@@ -16,7 +16,7 @@ Current scope: deliver the existing application as a reproducible source handove
 - [x] H10 Archive and checksum-verify legacy code/private results/data before retiring active-layout copies; preserve database volumes/configuration and local secrets.
 - [x] H11 Remove retired Next.js API routes; all persistence remains in FastAPI.
 - [x] H12 Consolidate setup/configuration/operations into `docs/HANDOFF.md`.
-- [x] H13 Add source-only packaging with per-file hashes, including untracked application files and excluding private/local artifacts.
+- [x] H13 Add source-only packaging with per-file hashes; restrict to Git-tracked files and exclude configured private paths and local artifacts.
 
 ## Final verification
 

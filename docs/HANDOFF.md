@@ -160,6 +160,8 @@ Stop writes and back up PostgreSQL (`pg_dump -Fc`) plus the complete source dire
 - No results after changing model revision: reindex sources; existing vectors are intentionally excluded until compatible.
 - OCR import error: install OCR extras locally or rebuild the Docker images with `INSTALL_OCR=true`.
 - Summary failure: check worker logs, summary endpoint/model availability and timeout. Correct and retry; the previous document version remains active.
+- `RAG_SUMMARY_TIMEOUT` caps the complete summary request, including a response that keeps sending small chunks; a timeout fails the indexing job rather than publishing a partial summary.
+- Typecheck references deleted routes in `.next/dev/types`: stop the frontend dev server, run `cd frontend`, `rm -rf .next/dev/types`, then `npm run typecheck`. This regenerates current route types; restart with `npm run dev`.
 - API ownership lost: restart the API after DB recovery. Do not start a second API against the same DB.
 
 ## Delivering the repository
@@ -170,4 +172,6 @@ Review and commit maintained source, lockfiles, migrations, tests, CI and docume
 .venv/bin/python backend/scripts/package_handoff.py
 ```
 
-It creates `dist/kyoritsu-rag-handoff.tar.gz` from an explicit source allowlist, including untracked application files. `HANDOFF_MANIFEST.json` records file hashes and the base Git commit; this is a working-tree snapshot, not a committed release. Private environment files, data, legacy archives, dependencies, builds, runtime storage and old PostgreSQL configuration are excluded. Inspect the package and final Git diff before sharing. The private recovery archive under `archives/` must not be sent as the code package.
+It requires a Git checkout and creates `dist/kyoritsu-rag-handoff.tar.gz` from Git-tracked files within the approved source roots. New files must be reviewed and added to Git before packaging; untracked local files are excluded. Modified tracked files use their working-tree contents. `HANDOFF_MANIFEST.json` records file hashes and the base Git commit; this is a working-tree snapshot, not a committed release.
+
+The packager excludes the selected `RAG_ENV_FILE` (default `backend/.env`) and the resolved `RAG_STORAGE_DIR`, even when tracked. It uses the same configuration precedence and path resolution as the backend, and fails if that configuration cannot be loaded. Run it with the deployment's configuration overrides if private paths differ from the defaults. Environment files, common private-key formats, legacy archives, dependencies, builds, default runtime storage and old PostgreSQL configuration are also excluded. Review tracked source for accidentally committed private data and inspect the package before sharing; this is not a general secret scanner. The private recovery archive under `archives/` must not be sent as the code package.

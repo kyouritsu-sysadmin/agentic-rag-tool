@@ -2,7 +2,17 @@
 
 Implementation branch: `v1.0.1`. Changes remain in the working tree. Dated entries distinguish earlier implementation checks from subsequent local setup and simulation; no commit was created during this verification.
 
-## Handover fixes, cleanup and final review — 2026-10-14
+## Follow-up review fixes — 2026-10-14
+
+The subsequent review found two code defects and stale local Next.js types. This entry supersedes the earlier review conclusion below.
+
+- Packaging now selects only Git-tracked working-tree files within approved roots and excludes the active configuration file and resolved source-storage directory, including custom names and tracked paths. Untracked results and common environment/key files are excluded. A regression test first reproduced inclusion of synthetic private files, then passed after the fix; it also checks the storage environment override.
+- Summary generation now has an overall asynchronous deadline. A regression test first reproduced a trickling response exceeding that deadline, then verified timeout cancellation and response cleanup after the fix. Existing response validation and disabled/mock-provider tests still pass.
+- Removed stale `.next/dev/types` references to retired routes. `npm run typecheck` now regenerates current route types first; the handoff guide documents stale dev-cache recovery.
+- **33 backend unit tests and 11 frontend runtime tests passed.** Backend lint/format, API contract comparison, frontend typecheck and diff whitespace checks passed. The initial sandboxed full unit run stalled in existing async/subprocess tests; it was stopped and the complete unit suite passed outside the sandbox.
+- No application database, real model inference, full browser integration or container build was exercised in this follow-up. Changes are uncommitted; the source package is regenerated from the updated working tree with verified file hashes.
+
+## Earlier handover fixes, cleanup and final review — 2026-10-14
 
 Current source status supersedes the historical checkpoints below. The reviewed handover is recorded on branch `v1.0.1`; the generated source archive includes a per-file hash manifest. The pre-existing local PostgreSQL Compose change is excluded from the handover commit.
 
